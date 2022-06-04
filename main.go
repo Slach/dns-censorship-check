@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/rs/zerolog/pkgerrors"
 	"github.com/urfave/cli/v2"
+	"io/ioutil"
 	stdlog "log"
 	"os"
 	"os/exec"
@@ -60,6 +61,7 @@ func run(c *cli.Context) error {
 	_ = os.Setenv("JSON", "1")
 	_ = os.Setenv("RRTYPE", c.String("type"))
 	localDNSServers, err := getLocalDNSServers()
+	log.Info().Msg("Lookup from LOCAL SYSTEM DNS Servers")
 	if err != nil {
 		return err
 	}
@@ -67,6 +69,7 @@ func run(c *cli.Context) error {
 	if len(localDNSResponses) == 0 {
 		return fmt.Errorf("can't resolve %s via local DNS servers %v", domain, localDNSServers)
 	}
+	log.Info().Msgf("Lookup from GLOBAL SYSTEM DNS Servers from %s", c.String("dns-servers-file"))
 	publicDNSServers, err := getPublicDNSServers(c)
 	if err != nil {
 		return err
@@ -108,11 +111,26 @@ func execCmdOut(cmd string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	log.Info().Msgf("%s %s", cmd, strings.Join(args, " "))
 	execCmd := exec.CommandContext(ctx, cmd, args...)
-	out, err := execCmd.CombinedOutput()
-	// @TODO WAT? why echo $? return non zero but golang can't detect it
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitStatus := exitErr.Error(); exitStatus != "0" {
-			log.Warn().Msgf("Exit Status: %d", exitStatus)
+	execCmd.Stdin = os.Stdin
+	execCmd.Stderr = os.Stderr
+	stdOut, err := execCmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("error execCmd.StdoutPipe: %v", err)
+	}
+	if err := execCmd.Start(); err != nil {
+		cancel()
+		return "", fmt.Errorf("error execCmd.Start: %v", err)
+	}
+	out, err := ioutil.ReadAll(stdOut)
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("error read execCmd stdout: %v", err)
+	}
+	if err := execCmd.Wait(); err != nil {
+		log.Warn().Msgf("error execCmd.Wait(): %v", err)
+		if exitError, ok := err.(*exec.ExitError); ok {
+			log.Warn().Msgf("exit code execCmd.Wait(): %v", exitError.ExitCode())
 		}
 		cancel()
 		return "", err
@@ -124,8 +142,8 @@ func execCmdOut(cmd string, args ...string) (string, error) {
 /* @todo need find more proper way to get local DNS server setting */
 func getLocalDNSServers() ([]string, error) {
 	nameservers := make([]string, 0)
-	replacer := strings.NewReplacer("{", "", "}", "")
 	if runtime.GOOS == "windows" {
+		replacer := strings.NewReplacer("{", "", "}", "")
 		ipconfig, err := execCmdOut("wmic.exe", "nicconfig", "list", "DNS", "/format:CSV")
 		if err != nil {
 			return nil, fmt.Errorf("wmic.exe return error: %v", err)
@@ -155,7 +173,10 @@ func getLocalDNSServers() ([]string, error) {
 		for scanner.Scan() {
 			l := scanner.Text()
 			if strings.Contains(l, "nameserver") {
-				nameservers = append(nameservers, replacer.Replace(l))
+				server := replacer.Replace(l)
+				if !strings.Contains(server, "#") {
+					nameservers = append(nameservers, server)
+				}
 			}
 		}
 
