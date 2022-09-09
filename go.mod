@@ -3,7 +3,7 @@ module github.com/Slach/dns-censorshit-check
 go 1.18
 
 require (
-	github.com/rs/zerolog v1.27.0
+	github.com/rs/zerolog v1.28.0
 	github.com/urfave/cli/v2 v2.11.2
 )
 
